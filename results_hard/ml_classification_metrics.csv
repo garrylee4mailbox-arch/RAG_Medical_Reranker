@@ -1,0 +1,2 @@
+﻿model,num_train_qids,num_test_qids,accuracy,precision,recall,f1,confusion_matrix,features
+logreg,375,125,0.9912,0.9191176470588235,1.0,0.9578544061302682,"[[1114, 11], [0, 125]]","embedding_score,keyword_overlap,department_match,question_length,context_length,length_ratio"
