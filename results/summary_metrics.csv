@@ -1,0 +1,3 @@
+﻿method,num_eval_qids,precision_at_1,precision_at_3,precision_at_5,mrr,ndcg_at_5,avg_latency_ms
+embedding_baseline,300,0.9967,1.0,1.0,0.9983,0.9988,0.0
+lightweight_ml,300,1.0,1.0,1.0,1.0,1.0,0.0002
