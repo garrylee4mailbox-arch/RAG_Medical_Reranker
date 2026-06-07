@@ -28,18 +28,31 @@ def load_medical_csv(path: Path, canonical_department: str) -> pd.DataFrame:
 
 
 def compute_similarity_scores(rows: pd.DataFrame) -> List[float]:
-    """Use multilingual SentenceTransformer if available; otherwise fallback to TF-IDF cosine."""
+    """Use Ollama embeddings first; otherwise fallback to TF-IDF cosine."""
     questions = rows["question"].tolist()
     contexts = rows["candidate_context"].tolist()
     try:
-        from sentence_transformers import SentenceTransformer
-        from src.utils import cosine_matrix
-        model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-        q_emb = model.encode(questions, batch_size=32, normalize_embeddings=True, show_progress_bar=True)
-        c_emb = model.encode(contexts, batch_size=32, normalize_embeddings=True, show_progress_bar=True)
-        return np.sum(np.asarray(q_emb) * np.asarray(c_emb), axis=1).astype(float).tolist()
+        import ollama
+
+        embedding_cache: Dict[str, np.ndarray] = {}
+
+        def embed_text(text: str) -> np.ndarray:
+            prompt = str(text)[:900]
+            if prompt not in embedding_cache:
+                response = ollama.embeddings(model="nomic-embed-text", prompt=prompt)
+                embedding_cache[prompt] = np.asarray(response["embedding"], dtype=float)
+                if len(embedding_cache) % 50 == 0:
+                    print(f"[INFO] Ollama embedded {len(embedding_cache)} unique texts")
+            return embedding_cache[prompt]
+
+        q_emb = np.vstack([embed_text(text) for text in questions])
+        c_emb = np.vstack([embed_text(text) for text in contexts])
+        numerator = np.sum(q_emb * c_emb, axis=1)
+        denominator = np.linalg.norm(q_emb, axis=1) * np.linalg.norm(c_emb, axis=1)
+        scores = np.divide(numerator, denominator, out=np.zeros_like(numerator, dtype=float), where=denominator > 0)
+        return scores.astype(float).tolist()
     except Exception as exc:
-        print(f"[WARN] SentenceTransformer embedding failed, fallback to TF-IDF. Reason: {exc}")
+        print(f"[WARN] Ollama embedding failed, fallback to TF-IDF. Reason: {exc}")
         vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(2, 4), min_df=1)
         all_text = questions + contexts
         mat = vectorizer.fit_transform(all_text)
@@ -92,6 +105,7 @@ def build_candidates(raw_dir: Path, out_path: Path, num_questions: int, hard_neg
                 "department": crow["canonical_department"],
                 "source_type": source_type,
                 "embedding_score": 0.0,
+                "question_department": q_dept,
             })
             context_counter += 1
 
