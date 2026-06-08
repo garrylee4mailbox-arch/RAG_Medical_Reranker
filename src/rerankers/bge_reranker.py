@@ -78,6 +78,7 @@ def main() -> None:
     # 后续 score_pairs() 返回的第 N 个分数，对应这里第 N 个 pair。
     pairs = cand[["question", "candidate_context"]].astype(str).values.tolist()
     model_type, model = load_model(use_fp16=not args.no_fp16)
+    print(f"[INFO] Loaded model source: {model_type}; batch_size={args.batch_size}; max_length={args.max_length}; fp16={not args.no_fp16}")
     t0 = time.perf_counter()
     scores = score_pairs(model_type, model, pairs, args.batch_size, args.max_length)
     total_ms = (time.perf_counter() - t0) * 1000
