@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
+from numbers import Real
 
 import pandas as pd
-from tqdm import tqdm
 
 from src.utils import ensure_parent, rank_scores, validate_candidates
 
@@ -27,6 +26,12 @@ def load_model(use_fp16: bool = True):
         return "cross_encoder", CrossEncoder(MODEL_NAME, trust_remote_code=True)
 
 
+def to_float_list(scores) -> list[float]:
+    if isinstance(scores, Real):
+        return [float(scores)]
+    return [float(x) for x in scores]
+
+
 def score_pairs(model_type: str, model, pairs: list[list[str]], batch_size: int, max_length: int) -> list[float]:
     """给每个 [问题, 候选文本] 二元组打相关性分数。
 
@@ -34,34 +39,30 @@ def score_pairs(model_type: str, model, pairs: list[list[str]], batch_size: int,
     reranker 不是分别给 question 和 context 做向量，而是把二者作为一对输入模型，
     让模型判断“这个候选文本是否能回答这个问题”。返回值顺序和 pairs 完全一致。
     """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+    if not pairs:
+        return []
+
     if model_type == "flag":
-        # FlagReranker 的 compute_score 可以直接接收一批文本对。
-        # 这里手动切 batch，是为了控制一次送入模型的样本数量，避免显存/内存爆掉。
-        scores = []
-        for i in tqdm(range(0, len(pairs), batch_size), desc="BGE scoring"):
-            batch = pairs[i:i + batch_size]
-            # max_length 控制 tokenizer 后的最长 token 数；过长的文本会被截断。
-            # normalize=True 会把原始 logits 转成更容易比较的归一化分数。
-            s = model.compute_score(batch, batch_size=batch_size, max_length=max_length, normalize=True)
-            # 当 batch 里只有 1 条数据时，部分版本会直接返回 float，而不是 list。
-            # 统一成 list 后，下面的 extend 逻辑就不用区分单条/多条。
-            if isinstance(s, float):
-                s = [s]
-            # 明确转成 Python float，避免 numpy/torch 标量写 CSV 时出现类型兼容问题。
-            scores.extend([float(x) for x in s])
-        return scores
+        # FlagReranker.compute_score 本身会按 batch_size 分批，并显示内部进度条。
+        # 如果这里再手动切 batch，就会让每次内部 tqdm 只处理 1 个 batch，造成刷屏。
+        # max_length 控制 tokenizer 后的最长 token 数；过长的文本会被截断。
+        # normalize=True 会把原始 logits 转成更容易比较的归一化分数。
+        scores = model.compute_score(pairs, batch_size=batch_size, max_length=max_length, normalize=True)
+        return to_float_list(scores)
 
     # fallback 的 CrossEncoder 接口更简单：predict 会自己按 batch_size 分批。
     # 这里没有传 max_length，因为 sentence-transformers 的 CrossEncoder 通常在模型
     # 或 tokenizer 配置里处理长度限制，接口也不一定接受同名参数。
     scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=True)
-    return [float(x) for x in scores]
+    return to_float_list(scores)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidates", default="data/processed/candidates_hard.csv")
-    parser.add_argument("--out", default="results/bge_scores.csv")
+    parser.add_argument("--out", default="results_hard/bge_scores.csv")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--sample", type=int, default=None, help="Debug only: score first N rows")
