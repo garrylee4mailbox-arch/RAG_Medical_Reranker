@@ -1,0 +1,2 @@
+﻿method,num_eval_qids,precision_at_1,precision_at_3,precision_at_5,mrr,ndcg_at_5,avg_latency_ms
+tiny_cross_encoder,125,0.208,0.48,0.632,0.4068,0.4262,0.0309
