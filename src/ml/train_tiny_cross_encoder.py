@@ -354,6 +354,9 @@ def evaluate(
         average="binary",
         zero_division=0,
     )
+    if not isinstance(precision, float) or not isinstance(recall, float) or not isinstance(f1, float):
+        raise ValueError(f"Expected precision, recall, f1 to be floats, got {type(precision)}, {type(recall)}, {type(f1)}")
+
     cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     val_loss = total_loss / max(total_rows, 1)
@@ -424,6 +427,9 @@ def evaluate_group(
         average="binary",
         zero_division=0,
     )
+    if not isinstance(precision, float) or not isinstance(recall, float) or not isinstance(f1, float):
+        raise ValueError(f"Expected precision, recall, f1 to be floats, got {type(precision)}, {type(recall)}, {type(f1)}")
+    
     cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     positive_rank_1_rate = rank_1 / max(total_groups, 1)
