@@ -1,0 +1,6 @@
+﻿method,num_eval_qids,precision_at_1,precision_at_3,precision_at_5,mrr,ndcg_at_5,avg_latency_ms
+embedding_baseline,500,0.886,0.968,0.986,0.9285,0.9416,0.0
+bge,500,0.982,0.998,0.998,0.9897,0.9916,4.0585
+bce,500,0.884,0.988,0.998,0.9358,0.9516,0.5252
+lightweight_ml,500,0.998,1.0,1.0,0.999,0.9993,0.0004
+embedding_department_bonus,500,0.886,0.97,0.986,0.929,0.942,0.0
