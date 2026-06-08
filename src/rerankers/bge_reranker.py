@@ -39,7 +39,7 @@ def score_pairs(model_type: str, model, pairs: list[list[str]], batch_size: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidates", default="data/processed/candidates.csv")
+    parser.add_argument("--candidates", default="data/processed/candidates_hard.csv")
     parser.add_argument("--out", default="results/bge_scores.csv")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=1024)

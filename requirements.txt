@@ -6,4 +6,4 @@ ollama>=0.3.0
 sentence-transformers>=2.7.0
 FlagEmbedding>=1.2.10
 torch>=2.0.0
-transformers>=4.40.0
+transformers>=4.40.0,<5
