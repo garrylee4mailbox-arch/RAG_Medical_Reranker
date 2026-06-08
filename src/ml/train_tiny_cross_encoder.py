@@ -225,6 +225,50 @@ def move_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str
     return {key: value.to(device) for key, value in batch.items()}
 
 
+def clone_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
+
+
+def is_better_metric(metric: str, value: float, best_value: float | None) -> bool:
+    if best_value is None:
+        return True
+    if metric == "val_loss":
+        return value < best_value
+    return value > best_value
+
+
+def ranking_metrics_from_scores(df: pd.DataFrame, scores: np.ndarray) -> Dict[str, float]:
+    ranked = df[["qid", "context_id", "label"]].copy()
+    ranked["score"] = scores
+    ranked = ranked.sort_values(["qid", "score", "context_id"], ascending=[True, False, True]).copy()
+    ranked["rank"] = ranked.groupby("qid").cumcount() + 1
+
+    p1: List[float] = []
+    p3: List[float] = []
+    p5: List[float] = []
+    rr: List[float] = []
+    for _, group in ranked.groupby("qid", sort=True):
+        positive_ranks = group.loc[group["label"].astype(int) == 1, "rank"]
+        if positive_ranks.empty:
+            p1.append(0.0)
+            p3.append(0.0)
+            p5.append(0.0)
+            rr.append(0.0)
+            continue
+        positive_rank = int(positive_ranks.min())
+        p1.append(1.0 if positive_rank <= 1 else 0.0)
+        p3.append(1.0 if positive_rank <= 3 else 0.0)
+        p5.append(1.0 if positive_rank <= 5 else 0.0)
+        rr.append(1.0 / float(positive_rank))
+
+    return {
+        "val_p1": float(np.mean(p1)) if p1 else 0.0,
+        "val_p3": float(np.mean(p3)) if p3 else 0.0,
+        "val_p5": float(np.mean(p5)) if p5 else 0.0,
+        "val_mrr": float(np.mean(rr)) if rr else 0.0,
+    }
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -281,12 +325,14 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    eval_df: pd.DataFrame | None = None,
 ) -> Dict[str, float | int]:
     model.eval()
     total_loss = 0.0
     total_rows = 0
     all_labels: List[int] = []
     all_preds: List[int] = []
+    all_scores: List[float] = []
 
     for batch in loader:
         batch = move_batch(batch, device)
@@ -295,6 +341,7 @@ def evaluate(
         probs = torch.sigmoid(logits)
         preds = (probs >= 0.5).long().cpu().numpy().tolist()
         labels = batch["labels"].long().cpu().numpy().tolist()
+        all_scores.extend(probs.cpu().numpy().astype(float).tolist())
         batch_size = int(batch["labels"].shape[0])
         total_loss += float(loss.item()) * batch_size
         total_rows += batch_size
@@ -309,8 +356,10 @@ def evaluate(
     )
     cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
-    return {
-        "test_loss": total_loss / max(total_rows, 1),
+    val_loss = total_loss / max(total_rows, 1)
+    metrics = {
+        "test_loss": val_loss,
+        "val_loss": val_loss,
         "accuracy": accuracy_score(all_labels, all_preds),
         "precision": precision,
         "recall": recall,
@@ -320,6 +369,11 @@ def evaluate(
         "fn": int(fn),
         "tp": int(tp),
     }
+    if eval_df is not None:
+        metrics.update(ranking_metrics_from_scores(eval_df, np.asarray(all_scores, dtype=float)))
+    else:
+        metrics.update({"val_p1": 0.0, "val_p3": 0.0, "val_p5": 0.0, "val_mrr": 0.0})
+    return metrics
 
 
 @torch.no_grad()
@@ -376,8 +430,10 @@ def evaluate_group(
     positive_rank_3_rate = rank_3 / max(total_groups, 1)
     positive_rank_5_rate = rank_5 / max(total_groups, 1)
     mean_reciprocal_rank = reciprocal_rank / max(total_groups, 1)
+    val_loss = total_loss / max(total_groups, 1)
     return {
-        "test_loss": total_loss / max(total_groups, 1),
+        "test_loss": val_loss,
+        "val_loss": val_loss,
         "accuracy": accuracy_score(all_labels, all_preds),
         "precision": precision,
         "recall": recall,
@@ -428,11 +484,36 @@ def score_rows(
     return np.asarray(scores, dtype=float), latency_ms
 
 
+def write_score_file(
+    path: str,
+    model: nn.Module,
+    df: pd.DataFrame,
+    vocab: Dict[str, int],
+    max_length: int,
+    batch_size: int,
+    device: torch.device,
+) -> pd.DataFrame:
+    scores, latency_ms = score_rows(model, df, vocab, max_length, batch_size, device)
+    raw_out = df[["qid", "context_id"]].copy()
+    raw_out["score"] = scores
+    raw_out["latency_ms"] = latency_ms
+    out = rank_scores(raw_out, METHOD)
+    ensure_parent(path)
+    out.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"[OK] wrote {path}: {len(out)} rows; avg latency={latency_ms:.4f} ms/pair")
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidates", default="data/processed/candidates_hard.csv")
     parser.add_argument("--out", default="results_hard/tiny_cross_encoder_scores.csv")
+    parser.add_argument("--test-out", default=None)
+    parser.add_argument("--train-out", default=None)
     parser.add_argument("--metrics-out", default="results_hard/tiny_cross_encoder_training_metrics.csv")
+    parser.add_argument("--save-best-checkpoint", default=None)
+    parser.add_argument("--select-best-by", choices=["val_mrr", "val_p1", "val_loss"], default="val_mrr")
+    parser.add_argument("--early-stopping-patience", type=int, default=0)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -498,18 +579,37 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     metric_rows = []
+    best_epoch = 0
+    best_metric_value: float | None = None
+    best_state_dict: Dict[str, torch.Tensor] | None = None
+    no_improve_epochs = 0
+    early_stopped = False
     for epoch in range(1, args.epochs + 1):
         if args.loss_type == "bce":
             train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-            metrics = evaluate(model, test_loader, criterion, device)
+            metrics = evaluate(model, test_loader, criterion, device, test_df)
         else:
             train_loss = train_one_group_epoch(model, train_loader, optimizer, criterion, device)
             metrics = evaluate_group(model, test_loader, criterion, device)
+        selected_metric_value = float(metrics[args.select_best_by])
+        if is_better_metric(args.select_best_by, selected_metric_value, best_metric_value):
+            best_epoch = epoch
+            best_metric_value = selected_metric_value
+            best_state_dict = clone_state_dict(model.state_dict())
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
         row = {
             "epoch": epoch,
             "loss_type": args.loss_type,
             "train_loss": train_loss,
             **metrics,
+            "best_epoch": best_epoch,
+            "is_best_epoch": False,
+            "selected_metric": args.select_best_by,
+            "selected_metric_value": selected_metric_value,
+            "early_stopped": False,
+            "no_improve_epochs": no_improve_epochs,
             "num_train_qids": len(train_qids),
             "num_test_qids": len(test_qids),
             "max_length": args.max_length,
@@ -530,21 +630,53 @@ def main() -> None:
                 f"val_p3={metrics['val_p3']:.4f} val_p5={metrics['val_p5']:.4f} "
                 f"val_mrr={metrics['val_mrr']:.4f}"
             )
+        if args.early_stopping_patience > 0 and no_improve_epochs >= args.early_stopping_patience:
+            early_stopped = True
+            print(
+                f"[EARLY STOP] no improvement in {args.select_best_by} for "
+                f"{args.early_stopping_patience} epochs; best_epoch={best_epoch}"
+            )
+            break
+
+    if best_state_dict is None:
+        raise RuntimeError("Training did not produce a best checkpoint state.")
+
+    model.load_state_dict(best_state_dict)
+    for row in metric_rows:
+        row["best_epoch"] = best_epoch
+        row["is_best_epoch"] = row["epoch"] == best_epoch
+        row["early_stopped"] = early_stopped
 
     metrics_out = pd.DataFrame(metric_rows)
     ensure_parent(args.metrics_out)
     metrics_out.to_csv(args.metrics_out, index=False, encoding="utf-8-sig")
 
-    score_df = candidates.copy() if args.score_all else test_df.copy()
-    scores, latency_ms = score_rows(model, score_df, vocab, args.max_length, args.batch_size, device)
-    raw_out = score_df[["qid", "context_id"]].copy()
-    raw_out["score"] = scores
-    raw_out["latency_ms"] = latency_ms
-    out = rank_scores(raw_out, METHOD)
-    ensure_parent(args.out)
-    out.to_csv(args.out, index=False, encoding="utf-8-sig")
+    if args.save_best_checkpoint:
+        ensure_parent(args.save_best_checkpoint)
+        torch.save(
+            {
+                "model_state_dict": best_state_dict,
+                "vocab": vocab,
+                "args": vars(args),
+                "config": vars(args),
+                "best_epoch": best_epoch,
+                "selected_metric": args.select_best_by,
+                "selected_metric_value": best_metric_value,
+                "max_length": args.max_length,
+                "seed": args.seed,
+                "loss_type": args.loss_type,
+            },
+            args.save_best_checkpoint,
+        )
+        print(f"[OK] wrote {args.save_best_checkpoint}")
 
-    print(f"[OK] wrote {args.out}: {len(out)} rows; avg latency={latency_ms:.4f} ms/pair")
+    score_df = candidates.copy() if args.score_all else test_df.copy()
+    out = write_score_file(args.out, model, score_df, vocab, args.max_length, args.batch_size, device)
+    if args.test_out:
+        write_score_file(args.test_out, model, test_df.copy(), vocab, args.max_length, args.batch_size, device)
+    if args.train_out:
+        write_score_file(args.train_out, model, train_df.copy(), vocab, args.max_length, args.batch_size, device)
+
     print(f"[OK] wrote {args.metrics_out}")
     print(metrics_out.tail(1).to_string(index=False))
     print(out.head(10).to_string(index=False))
