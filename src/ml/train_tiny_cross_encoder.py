@@ -307,11 +307,14 @@ def evaluate(
         average="binary",
         zero_division=0,
     )
+    if not isinstance(precision, float) or not isinstance(recall, float) or not isinstance(f1, float):
+        raise ValueError(f"Expected precision, recall, f1 to be floats, got {type(precision)}, {type(recall)}, {type(f1)}")
+
     cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     return {
         "test_loss": total_loss / max(total_rows, 1),
-        "accuracy": accuracy_score(all_labels, all_preds),
+        "accuracy": float(accuracy_score(all_labels, all_preds)),
         "precision": precision,
         "recall": recall,
         "f1": f1,
@@ -370,6 +373,9 @@ def evaluate_group(
         average="binary",
         zero_division=0,
     )
+    if not isinstance(precision, float) or not isinstance(recall, float) or not isinstance(f1, float):
+        raise ValueError(f"Expected precision, recall, f1 to be floats, got {type(precision)}, {type(recall)}, {type(f1)}")
+    
     cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     positive_rank_1_rate = rank_1 / max(total_groups, 1)
@@ -378,7 +384,7 @@ def evaluate_group(
     mean_reciprocal_rank = reciprocal_rank / max(total_groups, 1)
     return {
         "test_loss": total_loss / max(total_groups, 1),
-        "accuracy": accuracy_score(all_labels, all_preds),
+        "accuracy": float(accuracy_score(all_labels, all_preds)),
         "precision": precision,
         "recall": recall,
         "f1": f1,
