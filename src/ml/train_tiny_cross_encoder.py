@@ -134,6 +134,46 @@ class PairDataset(Dataset):
         return item
 
 
+class GroupDataset(Dataset):
+    def __init__(self, df: pd.DataFrame, vocab: Dict[str, int], max_length: int, group_size: int = 10) -> None:
+        self.input_ids: List[torch.Tensor] = []
+        self.token_type_ids: List[torch.Tensor] = []
+        self.attention_mask: List[torch.Tensor] = []
+        self.labels: List[torch.Tensor] = []
+        self.targets: List[int] = []
+
+        for qid, group in df.groupby("qid", sort=True):
+            if len(group) != group_size:
+                raise ValueError(f"Expected {group_size} candidates for qid={qid}, got {len(group)}")
+
+            label_values = group["label"].astype(int).to_numpy()
+            positive_idxs = np.flatnonzero(label_values == 1)
+            if len(positive_idxs) != 1:
+                raise ValueError(f"Expected exactly one positive label for qid={qid}, got {len(positive_idxs)}")
+
+            encoded = [
+                encode_pair(row.question, row.candidate_context, vocab, max_length)
+                for row in group[["question", "candidate_context"]].itertuples(index=False)
+            ]
+            self.input_ids.append(torch.tensor([item.input_ids for item in encoded], dtype=torch.long))
+            self.token_type_ids.append(torch.tensor([item.token_type_ids for item in encoded], dtype=torch.long))
+            self.attention_mask.append(torch.tensor([item.attention_mask for item in encoded], dtype=torch.long))
+            self.labels.append(torch.tensor(label_values, dtype=torch.float32))
+            self.targets.append(int(positive_idxs[0]))
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, idx: int):
+        return {
+            "input_ids": self.input_ids[idx],
+            "token_type_ids": self.token_type_ids[idx],
+            "attention_mask": self.attention_mask[idx],
+            "labels": self.labels[idx],
+            "targets": torch.tensor(self.targets[idx], dtype=torch.long),
+        }
+
+
 class TinyCrossEncoder(nn.Module):
     def __init__(
         self,
@@ -208,6 +248,33 @@ def train_one_epoch(
     return total_loss / max(total_rows, 1)
 
 
+def train_one_group_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+) -> float:
+    model.train()
+    total_loss = 0.0
+    total_groups = 0
+    for batch in loader:
+        batch = move_batch(batch, device)
+        batch_size, group_size, seq_len = batch["input_ids"].shape
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(
+            batch["input_ids"].reshape(batch_size * group_size, seq_len),
+            batch["token_type_ids"].reshape(batch_size * group_size, seq_len),
+            batch["attention_mask"].reshape(batch_size * group_size, seq_len),
+        ).reshape(batch_size, group_size)
+        loss = criterion(logits, batch["targets"])
+        loss.backward()
+        optimizer.step()
+        total_loss += float(loss.item()) * batch_size
+        total_groups += batch_size
+    return total_loss / max(total_groups, 1)
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -256,6 +323,81 @@ def evaluate(
 
 
 @torch.no_grad()
+def evaluate_group(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> Dict[str, float | int]:
+    model.eval()
+    total_loss = 0.0
+    total_groups = 0
+    rank_1 = 0
+    rank_3 = 0
+    rank_5 = 0
+    reciprocal_rank = 0.0
+    all_labels: List[int] = []
+    all_preds: List[int] = []
+
+    for batch in loader:
+        batch = move_batch(batch, device)
+        batch_size, group_size, seq_len = batch["input_ids"].shape
+        logits = model(
+            batch["input_ids"].reshape(batch_size * group_size, seq_len),
+            batch["token_type_ids"].reshape(batch_size * group_size, seq_len),
+            batch["attention_mask"].reshape(batch_size * group_size, seq_len),
+        ).reshape(batch_size, group_size)
+        loss = criterion(logits, batch["targets"])
+        total_loss += float(loss.item()) * batch_size
+        total_groups += batch_size
+
+        sorted_idxs = torch.argsort(logits, dim=1, descending=True)
+        target_positions = (sorted_idxs == batch["targets"].unsqueeze(1)).nonzero(as_tuple=False)[:, 1] + 1
+        rank_1 += int((target_positions <= 1).sum().item())
+        rank_3 += int((target_positions <= 3).sum().item())
+        rank_5 += int((target_positions <= 5).sum().item())
+        reciprocal_rank += float((1.0 / target_positions.float()).sum().item())
+
+        probs = torch.sigmoid(logits)
+        preds = (probs >= 0.5).long().reshape(-1).cpu().numpy().tolist()
+        labels = batch["labels"].long().reshape(-1).cpu().numpy().tolist()
+        all_preds.extend(preds)
+        all_labels.extend(labels)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels,
+        all_preds,
+        average="binary",
+        zero_division=0,
+    )
+    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    positive_rank_1_rate = rank_1 / max(total_groups, 1)
+    positive_rank_3_rate = rank_3 / max(total_groups, 1)
+    positive_rank_5_rate = rank_5 / max(total_groups, 1)
+    mean_reciprocal_rank = reciprocal_rank / max(total_groups, 1)
+    return {
+        "test_loss": total_loss / max(total_groups, 1),
+        "accuracy": accuracy_score(all_labels, all_preds),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "positive_rank_1_rate": positive_rank_1_rate,
+        "positive_rank_3_rate": positive_rank_3_rate,
+        "positive_rank_5_rate": positive_rank_5_rate,
+        "mean_reciprocal_rank": mean_reciprocal_rank,
+        "val_p1": positive_rank_1_rate,
+        "val_p3": positive_rank_3_rate,
+        "val_p5": positive_rank_5_rate,
+        "val_mrr": mean_reciprocal_rank,
+    }
+
+
+@torch.no_grad()
 def score_rows(
     model: nn.Module,
     df: pd.DataFrame,
@@ -297,6 +439,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--pos-weight", type=float, default=9.0)
+    parser.add_argument("--loss-type", choices=["bce", "group_ce"], default="bce")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--score-all", action="store_true", help="Score all qids after training. Default scores test qids only.")
@@ -327,11 +470,17 @@ def main() -> None:
         raise RuntimeError(f"Qid leakage detected between train and test: {sorted(overlap)[:5]}")
 
     vocab = build_vocab(train_df)
-    train_dataset = PairDataset(train_df, vocab, args.max_length, include_labels=True)
-    test_dataset = PairDataset(test_df, vocab, args.max_length, include_labels=True)
     pin_memory = device.type == "cuda"
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=pin_memory)
+    if args.loss_type == "bce":
+        train_dataset = PairDataset(train_df, vocab, args.max_length, include_labels=True)
+        test_dataset = PairDataset(test_df, vocab, args.max_length, include_labels=True)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=pin_memory)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=pin_memory)
+    else:
+        train_dataset = GroupDataset(train_df, vocab, args.max_length)
+        test_dataset = GroupDataset(test_df, vocab, args.max_length)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=pin_memory)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=pin_memory)
 
     model = TinyCrossEncoder(
         vocab_size=len(vocab),
@@ -342,15 +491,23 @@ def main() -> None:
         num_layers=args.num_layers,
         dropout=args.dropout,
     ).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.pos_weight, dtype=torch.float32, device=device))
+    if args.loss_type == "bce":
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.pos_weight, dtype=torch.float32, device=device))
+    else:
+        criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     metric_rows = []
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        metrics = evaluate(model, test_loader, criterion, device)
+        if args.loss_type == "bce":
+            train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+            metrics = evaluate(model, test_loader, criterion, device)
+        else:
+            train_loss = train_one_group_epoch(model, train_loader, optimizer, criterion, device)
+            metrics = evaluate_group(model, test_loader, criterion, device)
         row = {
             "epoch": epoch,
+            "loss_type": args.loss_type,
             "train_loss": train_loss,
             **metrics,
             "num_train_qids": len(train_qids),
@@ -360,11 +517,19 @@ def main() -> None:
             "seed": args.seed,
         }
         metric_rows.append(row)
-        print(
-            f"[EPOCH {epoch:02d}] train_loss={train_loss:.4f} "
-            f"test_loss={metrics['test_loss']:.4f} f1={metrics['f1']:.4f} "
-            f"precision={metrics['precision']:.4f} recall={metrics['recall']:.4f}"
-        )
+        if args.loss_type == "bce":
+            print(
+                f"[EPOCH {epoch:02d}] train_loss={train_loss:.4f} "
+                f"test_loss={metrics['test_loss']:.4f} f1={metrics['f1']:.4f} "
+                f"precision={metrics['precision']:.4f} recall={metrics['recall']:.4f}"
+            )
+        else:
+            print(
+                f"[EPOCH {epoch:02d}] train_loss={train_loss:.4f} "
+                f"test_loss={metrics['test_loss']:.4f} val_p1={metrics['val_p1']:.4f} "
+                f"val_p3={metrics['val_p3']:.4f} val_p5={metrics['val_p5']:.4f} "
+                f"val_mrr={metrics['val_mrr']:.4f}"
+            )
 
     metrics_out = pd.DataFrame(metric_rows)
     ensure_parent(args.metrics_out)
