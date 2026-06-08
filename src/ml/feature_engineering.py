@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from src.utils import clean_text, infer_question_department
+from src.utils import clean_text
 
 FEATURE_COLUMNS = [
     "embedding_score",
@@ -14,6 +14,7 @@ FEATURE_COLUMNS = [
     "department_match",
     "question_length",
     "context_length",
+    "length_ratio",
 ]
 
 
@@ -37,8 +38,19 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     out["embedding_score"] = pd.to_numeric(df["embedding_score"], errors="coerce").fillna(0.0)
     out["keyword_overlap"] = [keyword_overlap(q, c) for q, c in zip(df["question"], df["candidate_context"])]
-    inferred = [infer_question_department(q) for q in df["question"]]
-    out["department_match"] = [1.0 if a != "unknown" and a == b else 0.0 for a, b in zip(inferred, df["department"].astype(str))]
-    out["question_length"] = df["question"].astype(str).str.len().clip(0, 500) / 500.0
-    out["context_length"] = df["candidate_context"].astype(str).str.len().clip(0, 1500) / 1500.0
+    out["department_match"] = [
+        1.0 if q_dept == dept else 0.0
+        for q_dept, dept in zip(df["question_department"].astype(str), df["department"].astype(str))
+    ]
+    question_lengths = df["question"].astype(str).str.len().astype(float)
+    context_lengths = df["candidate_context"].astype(str).str.len().astype(float)
+    out["question_length"] = question_lengths.clip(0, 500) / 500.0
+    out["context_length"] = context_lengths.clip(0, 1500) / 1500.0
+    ratios = np.divide(
+        np.minimum(question_lengths, context_lengths),
+        np.maximum(question_lengths, context_lengths),
+        out=np.zeros(len(df), dtype=float),
+        where=np.maximum(question_lengths, context_lengths) > 0,
+    )
+    out["length_ratio"] = ratios
     return out[FEATURE_COLUMNS].astype(float)
