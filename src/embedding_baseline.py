@@ -9,14 +9,14 @@ from src.utils import ensure_parent, rank_scores, validate_candidates
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidates", default="data/processed/candidates.csv")
-    parser.add_argument("--out", default="results/embedding_baseline_scores.csv")
+    parser.add_argument("--candidates", default="data/processed/candidates_hard.csv")
+    parser.add_argument("--out", default="results_hard/embedding_baseline_scores.csv")
     args = parser.parse_args()
 
     cand = pd.read_csv(args.candidates)
     validate_candidates(cand)
     scores = cand[["qid", "context_id", "embedding_score"]].rename(columns={"embedding_score": "score"})
-    scores["latency_ms"] = 0.0
+    scores["latency_ms"] = 0.0     # 因为embedding已经算好并存储到candidates(_hard).csv里了，所以这里的推理时间近似为0
     out = rank_scores(scores, "embedding_baseline")
     ensure_parent(args.out)
     out.to_csv(args.out, index=False, encoding="utf-8-sig")

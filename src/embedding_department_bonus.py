@@ -28,7 +28,7 @@ def main() -> None:
 
     scores = out[["qid", "context_id"]].copy()
     scores["score"] = base + matches.astype(float) * float(args.bonus)
-    scores["latency_ms"] = 0.0
+    scores["latency_ms"] = 0.0     # 因为embedding已经算好并存储到candidates(_hard).csv里了，所以这里的推理时间近似为0
     scores = rank_scores(scores, METHOD)
 
     ensure_parent(args.out)

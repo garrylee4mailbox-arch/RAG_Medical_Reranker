@@ -14,8 +14,8 @@ from src.utils import ensure_parent, rank_scores, validate_candidates
 
 METHOD = "bce"
 DEFAULT_MODEL_NAME = "maidalun1020/bce-reranker-base_v1"
-DEFAULT_CANDIDATES_PATH = "data/processed/candidates.csv"
-DEFAULT_OUTPUT_PATH = "results/bce_scores.csv"
+DEFAULT_CANDIDATES_PATH = "data/processed/candidates_hard.csv"
+DEFAULT_OUTPUT_PATH = "results_hard/bce_scores.csv"
 
 
 def parse_args() -> argparse.Namespace:
